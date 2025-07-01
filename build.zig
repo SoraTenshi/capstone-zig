@@ -9,6 +9,7 @@ pub fn build(b: *std.Build) void {
     const pic = b.option(bool, "pie", "Produce Position Independent Code");
 
     const use_default_alloc = b.option(bool, "use-default-alloc", "Use default memory allocation functions") orelse true;
+    const use_arch_registration = b.option(bool, "use-arch-registration", "Use explicit architecture registration") orelse false;
     const build_diet = b.option(bool, "build-diet", "Build diet library") orelse false;
     const x86_reduce = b.option(bool, "x86-reduce", "x86 with reduce instruction sets to minimize library") orelse false;
     const x86_att_disable = b.option(bool, "x86-att-disable", "Disable x86 AT&T syntax") orelse false;
@@ -48,9 +49,8 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(capstone);
     capstone.addIncludePath(upstream.path("include"));
-    // The header files should be installed in a 'capstone' subdirectory in capstone v6.
-    capstone.installHeadersDirectory(upstream.path("include/capstone"), "", .{});
-    capstone.installHeader(upstream.path("include/platform.h"), "platform.h");
+    capstone.installHeadersDirectory(upstream.path("include/capstone"), "capstone", .{});
+    capstone.installHeader(upstream.path("include/platform.h"), "capstone/platform.h");
     capstone.addCSourceFiles(.{ .root = upstream.path(""), .files = common_sources });
 
     if (build_diet) capstone.root_module.addCMacro("CAPSTONE_DIET", "");
@@ -60,29 +60,34 @@ pub fn build(b: *std.Build) void {
     if (osx_kernel_support) capstone.root_module.addCMacro("CAPSTONE_HAS_OSXKERNEL", "");
     if (optimize == .Debug) capstone.root_module.addCMacro("CAPSTONE_DEBUG", "");
 
-    var it = supported_architectures.iterator();
-    while (it.next()) |key| {
-        // std.log.info("Enabling CAPSTONE_HAS_{s}", .{key.macroName()});
-        capstone.root_module.addCMacro(b.fmt("CAPSTONE_HAS_{s}", .{key.macroName()}), "");
-        capstone.addCSourceFiles(.{
-            .root = upstream.path(b.fmt("arch/{s}", .{key.subdirectory()})),
-            .files = key.sources(),
-        });
-        if (key == .x86 and !build_diet) {
-            capstone.addCSourceFile(.{ .file = upstream.path("arch/X86/X86ATTInstPrinter.c") });
+    if (use_arch_registration) {
+        capstone.root_module.addCMacro("CAPSTONE_USE_ARCH_REGISTRATION", "");
+    } else {
+        var it = supported_architectures.iterator();
+        while (it.next()) |key| {
+            // std.log.info("Enabling CAPSTONE_HAS_{s}", .{key.macroName()});
+            capstone.root_module.addCMacro(b.fmt("CAPSTONE_HAS_{s}", .{key.macroName()}), "");
+            capstone.addCSourceFiles(.{
+                .root = upstream.path(b.fmt("arch/{s}", .{key.subdirectory()})),
+                .files = key.sources(),
+            });
+            if (key == .x86 and !build_diet) {
+                capstone.addCSourceFile(.{ .file = upstream.path("arch/X86/X86ATTInstPrinter.c") });
+            }
         }
     }
 
     {
         const cstool = b.addExecutable(.{
             .name = "cstool",
-            .target = target,
-            .optimize = optimize,
-            .pic = pic,
-            .strip = strip,
-            .link_libc = true,
+            .root_module = b.createModule(.{
+                .target = target,
+                .optimize = optimize,
+                .pic = pic,
+                .strip = strip,
+                .link_libc = true,
+            }),
         });
-        cstool.addIncludePath(upstream.path("include")); // remove this in capstone v6
         cstool.linkLibrary(capstone);
         cstool.addCSourceFiles(.{ .root = upstream.path("cstool"), .files = cstool_sources });
         cstool.addCSourceFile(.{ .file = upstream.path("cstool/getopt.c") });
@@ -94,41 +99,6 @@ pub fn build(b: *std.Build) void {
 
         const run_step = b.step("cstool", "Run cstool");
         run_step.dependOn(&run_cmd.step);
-    }
-
-    {
-        const test_all_step = b.step("run-all-tests", "Run all test executables");
-
-        var files: std.ArrayListUnmanaged([]const u8) = .{};
-        files.appendSlice(b.allocator, test_sources) catch @panic("OOM");
-
-        it = supported_architectures.iterator();
-        while (it.next()) |key| {
-            if (key == .tricore) continue; // UB in print_zero_ext: https://github.com/capstone-engine/capstone/pull/2204
-            files.appendSlice(b.allocator, key.testSources()) catch @panic("OOM");
-        }
-
-        for (files.items) |file| {
-            const name = file["test_".len .. file.len - 2];
-            const exe = b.addExecutable(.{
-                .name = b.fmt("test-{s}", .{name}),
-                .target = target,
-                .optimize = optimize,
-                .pic = pic,
-                .strip = strip,
-                .link_libc = true,
-            });
-            exe.addIncludePath(upstream.path("include")); // remove this in capstone v6
-            exe.linkLibrary(capstone);
-            exe.addCSourceFile(.{ .file = upstream.path("tests").path(b, file) });
-
-            const run_exe = b.addRunArtifact(exe);
-            _ = run_exe.captureStdErr();
-            test_all_step.dependOn(&run_exe.step);
-
-            const step = b.step(b.fmt("run-test-{s}", .{name}), b.fmt("Run test-{s}", .{name}));
-            step.dependOn(&b.addRunArtifact(exe).step);
-        }
     }
 }
 
@@ -157,14 +127,13 @@ pub const SupportedArchitecture = enum {
     sh,
     /// Unsupported Zig Target
     tricore,
-
-    // Available in the development branch of capstone
-
-    // /// Unsupported Zig Target
-    // alpha,
-    // /// Unsupported Zig Target
-    // hppa,
-    // loongarch,
+    /// Unsupported Zig Target
+    alpha,
+    /// Unsupported Zig Target
+    hppa,
+    loongarch,
+    xtensa,
+    arc,
 
     pub fn fromArch(arch: std.Target.Cpu.Arch) ?SupportedArchitecture {
         return switch (arch) {
@@ -180,7 +149,9 @@ pub const SupportedArchitecture = enum {
             .wasm32, .wasm64 => .wasm,
             .bpfel, .bpfeb => .bpf,
             .riscv32, .riscv64 => .riscv,
-            .loongarch32, .loongarch64 => null, // Available in the development branch of capstone
+            .loongarch32, .loongarch64 => .loongarch,
+            .xtensa => .xtensa,
+            .arc => .arc,
 
             else => null,
         };
@@ -189,15 +160,15 @@ pub const SupportedArchitecture = enum {
     fn macroName(self: SupportedArchitecture) []const u8 {
         return switch (self) {
             .arm => "ARM",
-            .aarch64 => "ARM64", // Renamed to 'AArch64' in the development branch of capstone
+            .aarch64 => "AARCH64",
+            .m68k => "M68K",
             .mips => "MIPS",
-            .powerpc => "POWERPC",
+            .powerpc => "PPC",
             .sparc => "SPARC",
-            .systemZ => "SYSZ",
+            .systemZ => "SYSTEMZ",
             .xcore => "XCORE",
             .x86 => "X86",
             .tms320c64x => "TMS320C64X",
-            .m68k => "M68K",
             .m680x => "M680X",
             .evm => "EVM",
             .mos65xx => "MOS65XX",
@@ -206,10 +177,11 @@ pub const SupportedArchitecture = enum {
             .riscv => "RISCV",
             .sh => "SH",
             .tricore => "TRICORE",
-            // Available in the development branch of capstone
-            // .alpha => "ALPHA",
-            // .hppa => "HPPA",
-            // .loongarch => "LOONGARCH",
+            .alpha => "ALPHA",
+            .hppa => "HPPA",
+            .loongarch => "LOONGARCH",
+            .xtensa => "XTENSA",
+            .arc => "ARC",
         };
     }
 
@@ -233,17 +205,20 @@ pub const SupportedArchitecture = enum {
             .riscv => "RISCV",
             .sh => "SH",
             .tricore => "TriCore",
-            // Available in the development branch of capstone
-            // .alpha => "Alpha",
-            // .hppa => "HPPA",
-            // .loongarch => "LoongArch",
+            .alpha => "Alpha",
+            .hppa => "HPPA",
+            .loongarch => "LoongArch",
+            .xtensa => "Xtensa",
+            .arc => "ARC",
         };
     }
 
     fn sources(self: SupportedArchitecture) []const []const u8 {
         return switch (self) {
             .arm => &.{
+                "ARMBaseInfo.c",
                 "ARMDisassembler.c",
+                "ARMDisassemblerExtension.c",
                 "ARMInstPrinter.c",
                 "ARMMapping.c",
                 "ARMModule.c",
@@ -251,6 +226,7 @@ pub const SupportedArchitecture = enum {
             .aarch64 => &.{
                 "AArch64BaseInfo.c",
                 "AArch64Disassembler.c",
+                "AArch64DisassemblerExtension.c",
                 "AArch64InstPrinter.c",
                 "AArch64Mapping.c",
                 "AArch64Module.c",
@@ -285,6 +261,7 @@ pub const SupportedArchitecture = enum {
             },
             .systemZ => &.{
                 "SystemZDisassembler.c",
+                "SystemZDisassemblerExtension.c",
                 "SystemZInstPrinter.c",
                 "SystemZMapping.c",
                 "SystemZModule.c",
@@ -351,96 +328,37 @@ pub const SupportedArchitecture = enum {
                 "TriCoreMapping.c",
                 "TriCoreModule.c",
             },
-            // Available in the development branch of capstone
-            // .alpha => &.{
-            //     "AlphaDisassembler.c",
-            //     "AlphaInstPrinter.c",
-            //     "AlphaMapping.c",
-            //     "AlphaModule.c",
-            // },
-            // .hppa => &.{
-            //     "HPPADisassembler.c",
-            //     "HPPAInstPrinter.c",
-            //     "HPPAMapping.c",
-            //     "HPPAModule.c",
-            // },
-            // .loongarch => &.{
-            //     "LoongArchDisassembler.c",
-            //     "LoongArchDisassemblerExtension.c",
-            //     "LoongArchInstPrinter.c",
-            //     "LoongArchMapping.c",
-            //     "LoongArchModule.c",
-            // },
-        };
-    }
-
-    fn testSources(self: SupportedArchitecture) []const []const u8 {
-        return switch (self) {
-            .arm => &.{
-                "test_arm.c",
+            .alpha => &.{
+                "AlphaDisassembler.c",
+                "AlphaInstPrinter.c",
+                "AlphaMapping.c",
+                "AlphaModule.c",
             },
-            .aarch64 => &.{
-                "test_arm64.c",
+            .hppa => &.{
+                "HPPADisassembler.c",
+                "HPPAInstPrinter.c",
+                "HPPAMapping.c",
+                "HPPAModule.c",
             },
-            .mips => &.{
-                "test_mips.c",
+            .loongarch => &.{
+                "LoongArchDisassembler.c",
+                "LoongArchDisassemblerExtension.c",
+                "LoongArchInstPrinter.c",
+                "LoongArchMapping.c",
+                "LoongArchModule.c",
             },
-            .powerpc => &.{
-                "test_ppc.c",
+            .xtensa => &.{
+                "XtensaDisassembler.c",
+                "XtensaInstPrinter.c",
+                "XtensaMapping.c",
+                "XtensaModule.c",
             },
-            .x86 => &.{
-                "test_x86.c",
-                "test_customized_mnem.c",
+            .arc => &.{
+                "ARCDisassembler.c",
+                "ARCInstPrinter.c",
+                "ARCMapping.c",
+                "ARCModule.c",
             },
-            .sparc => &.{
-                "test_sparc.c",
-            },
-            .systemZ => &.{
-                "test_systemz.c",
-            },
-            .xcore => &.{
-                "test_xcore.c",
-            },
-            .m68k => &.{
-                "test_m68k.c",
-            },
-            .tms320c64x => &.{
-                "test_tms320c64x.c",
-            },
-            .m680x => &.{
-                "test_m680x.c",
-            },
-            .evm => &.{
-                "test_evm.c",
-            },
-            .wasm => &.{
-                "test_wasm.c",
-            },
-            .mos65xx => &.{
-                "test_mos65xx.c",
-            },
-            .bpf => &.{
-                "test_bpf.c",
-            },
-            .riscv => &.{
-                "test_riscv.c",
-            },
-            .sh => &.{
-                "test_sh.c",
-            },
-            .tricore => &.{
-                "test_tricore.c",
-            },
-            // Available in the development branch of capstone
-            // .alpha => &.{
-            //     "test_alpha.c",
-            // },
-            // .hppa => &.{
-            //     "test_hppa.c",
-            // },
-            // .loongarch => &.{
-            //     "test_loongarch.c",
-            // },
         };
     }
 };
@@ -450,6 +368,7 @@ const common_sources: []const []const u8 = &.{
     "Mapping.c",
     "MCInst.c",
     "MCInstrDesc.c",
+    "MCInstPrinter.c",
     "MCRegisterInfo.c",
     "SStream.c",
     "utils.c",
@@ -457,10 +376,14 @@ const common_sources: []const []const u8 = &.{
 
 const cstool_sources: []const []const u8 = &.{
     "cstool.c",
+    "cstool_aarch64.c",
+    "cstool_alpha.c",
+    "cstool_arc.c",
     "cstool_arm.c",
-    "cstool_arm64.c",
     "cstool_bpf.c",
     "cstool_evm.c",
+    "cstool_hppa.c",
+    "cstool_loongarch.c",
     "cstool_m680x.c",
     "cstool_m68k.c",
     "cstool_mips.c",
@@ -475,11 +398,5 @@ const cstool_sources: []const []const u8 = &.{
     "cstool_wasm.c",
     "cstool_x86.c",
     "cstool_xcore.c",
-};
-
-const test_sources: []const []const u8 = &.{
-    "test_basic.c",
-    "test_detail.c",
-    "test_skipdata.c",
-    "test_iter.c",
+    "cstool_xtensa.c",
 };

@@ -18,7 +18,7 @@ pub fn build(b: *std.Build) void {
     const supported_architectures_only_native = b.option(bool, "support-only-target-arch", "Only support the architecture of the build target") orelse false;
     const supported_architectures_list = b.option([]const SupportedArchitecture, "supported-architectures", "Specify which Architectures should be supported");
 
-    var supported_architectures: std.EnumSet(SupportedArchitecture) = .{};
+    var supported_architectures: std.EnumSet(SupportedArchitecture) = .empty;
     if (supported_architectures_only_native) {
         if (SupportedArchitecture.fromArch(target.result.cpu.arch)) |arch| {
             supported_architectures.setPresent(arch, true);
@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
             supported_architectures.setPresent(arch, true);
         }
     } else {
-        supported_architectures = std.EnumSet(SupportedArchitecture).initFull();
+        supported_architectures = .full;
     }
 
     const upstream = b.dependency("capstone", .{});
@@ -48,10 +48,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(capstone);
-    capstone.addIncludePath(upstream.path("include"));
+    capstone.root_module.addIncludePath(upstream.path("include"));
     capstone.installHeadersDirectory(upstream.path("include/capstone"), "capstone", .{});
     capstone.installHeader(upstream.path("include/platform.h"), "capstone/platform.h");
-    capstone.addCSourceFiles(.{ .root = upstream.path(""), .files = common_sources });
+    capstone.root_module.addCSourceFiles(.{ .root = upstream.path(""), .files = common_sources });
 
     if (build_diet) capstone.root_module.addCMacro("CAPSTONE_DIET", "");
     if (use_default_alloc) capstone.root_module.addCMacro("CAPSTONE_USE_SYS_DYN_MEM", "");
@@ -67,12 +67,12 @@ pub fn build(b: *std.Build) void {
         while (it.next()) |key| {
             // std.log.info("Enabling CAPSTONE_HAS_{s}", .{key.macroName()});
             capstone.root_module.addCMacro(b.fmt("CAPSTONE_HAS_{s}", .{key.macroName()}), "");
-            capstone.addCSourceFiles(.{
+            capstone.root_module.addCSourceFiles(.{
                 .root = upstream.path(b.fmt("arch/{s}", .{key.subdirectory()})),
                 .files = key.sources(),
             });
             if (key == .x86 and !build_diet) {
-                capstone.addCSourceFile(.{ .file = upstream.path("arch/X86/X86ATTInstPrinter.c") });
+                capstone.root_module.addCSourceFile(.{ .file = upstream.path("arch/X86/X86ATTInstPrinter.c") });
             }
         }
     }
@@ -88,9 +88,9 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
-        cstool.linkLibrary(capstone);
-        cstool.addCSourceFiles(.{ .root = upstream.path("cstool"), .files = cstool_sources });
-        cstool.addCSourceFile(.{ .file = upstream.path("cstool/getopt.c") });
+        cstool.root_module.linkLibrary(capstone);
+        cstool.root_module.addCSourceFiles(.{ .root = upstream.path("cstool"), .files = cstool_sources });
+        cstool.root_module.addCSourceFile(.{ .file = upstream.path("cstool/getopt.c") });
         b.installArtifact(cstool);
 
         const run_cmd = b.addRunArtifact(cstool);

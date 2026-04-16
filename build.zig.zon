@@ -1,7 +1,7 @@
 .{
     .name = .capstone,
     .version = "6.0.0-Alpha4",
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0xc2a7c096815463b6,
 
     .dependencies = .{

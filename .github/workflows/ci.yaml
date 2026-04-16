@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         zig-version:
-          - 0.14.1
+          - latest
           - master # Let's test master while it works so that breaking it is deliberate decision
         os:
           - ubuntu-latest
